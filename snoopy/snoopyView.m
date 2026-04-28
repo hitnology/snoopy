@@ -18,15 +18,17 @@
 @interface snoopyView()
 
 @property (nonatomic, strong) AVQueuePlayer *queuePlayer;
-@property (nonatomic, strong) AVPlayerLayer *playerLayer;
 @property (nonatomic, strong) SKView *skView;
 @property (nonatomic, strong) SKScene *scene;
-@property (nonatomic, assign) BOOL test;
-@property (nonatomic, assign) int index;
-@property (nonatomic, copy) NSArray<NSString *> *videoURLs;
+@property (nonatomic, strong) SKVideoNode *videoNode;
+@property (nonatomic, assign) BOOL isAnimating;
+@property (nonatomic, assign) NSInteger clipIndex;
+@property (nonatomic, copy) NSArray<Clip *> *clips;
+@property (nonatomic, copy) NSArray<AVPlayerItem *> *currentClipItems;
+@property (nonatomic, copy) NSArray<AVPlayerItem *> *queuedClipItems;
 @property (nonatomic, copy) NSArray<NSColor *> *colors;
 @property (nonatomic, copy) NSArray<NSString *> *backgroundImages;
-@property (nonatomic, assign) os_log_t log;
+@property (nonatomic, strong) os_log_t log;
 
 @end
 
@@ -46,8 +48,8 @@
             self.colors = @[[NSColor colorWithRed:50.0/255.0 green:60.0/255.0 blue:47.0/255.0 alpha:1],
                            [NSColor colorWithRed:5.0/255.0 green:168.0/255.0 blue:157.0/255.0 alpha:1],
                            [NSColor colorWithRed:65.0/255.0 green:176.0/255.0 blue:246.0/255.0 alpha:1],
-                            [NSColor colorWithRed:238.0/255.0 green:95.0/255.0 blue:167.0/255.0 alpha:1],
-                            [NSColor blackColor]];
+                           [NSColor colorWithRed:238.0/255.0 green:95.0/255.0 blue:167.0/255.0 alpha:1],
+                           [NSColor blackColor]];
             self.wantsLayer = YES;
             [self loadBackgroundImages];
             [self setupPlayer];
@@ -69,44 +71,159 @@
     }
     
     NSPredicate *heicFilter = [NSPredicate predicateWithFormat:@"self ENDSWITH[c] '.heic'"];
-    NSArray<NSString *> *heicFiles = [files filteredArrayUsingPredicate:heicFilter];
+    NSArray<NSString *> *heicFiles = [[files filteredArrayUsingPredicate:heicFilter] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
     self.backgroundImages = heicFiles;
 }
 
-- (NSArray<AVPlayerItem *> *)configPlayerItems {
-    NSArray<NSString *> *videoURLs = [Clip randomClipURLs:[Clip loadClips]];
-    self.videoURLs = videoURLs;
-    NSMutableArray<AVPlayerItem *> *playerItems = [NSMutableArray array];
-    
-    for (NSString *videoStr in videoURLs) {
-        if (videoStr) {
-            NSURL *videoURL = [[NSBundle bundleForClass:[self class]] URLForResource:videoStr withExtension:nil];
-            AVPlayerItem *item = [AVPlayerItem playerItemWithURL:videoURL];
-            [playerItems addObject:item];
-        } else {
+- (void)loadPlaybackClips {
+    self.clips = [Clip randomizedClips:[Clip loadClips]];
+    self.clipIndex = 0;
+}
+
+- (NSArray<AVPlayerItem *> *)playerItemsForClip:(Clip *)clip {
+    NSArray<NSString *> *playbackURLs = [clip playbackURLs];
+    NSMutableArray<AVPlayerItem *> *playerItems = [NSMutableArray arrayWithCapacity:playbackURLs.count];
+    for (NSString *videoStr in playbackURLs) {
+        NSURL *videoURL = [[NSBundle bundleForClass:[self class]] URLForResource:videoStr withExtension:nil];
+        if (!videoURL) {
             NSLog(@"Error: Video file %@ not found!", videoStr);
+            continue;
         }
+        [playerItems addObject:[AVPlayerItem playerItemWithURL:videoURL]];
     }
     return [playerItems copy];
 }
 
+- (BOOL)shouldResetVideoNodeFromClip:(Clip *)currentClip toClip:(Clip *)nextClip {
+    if (currentClip == nil || nextClip == nil) {
+        return NO;
+    }
+
+    NSUInteger currentClipSegmentCount = [currentClip playbackURLs].count;
+    NSUInteger nextClipSegmentCount = [nextClip playbackURLs].count;
+    return currentClipSegmentCount <= 1 && nextClipSegmentCount > 1;
+}
+
+- (NSInteger)nextClipIndexAfterIndex:(NSInteger)clipIndex {
+    if (self.clips.count == 0) {
+        return NSNotFound;
+    }
+
+    return (clipIndex + 1) % self.clips.count;
+}
+
+- (void)appendPlayerItemsToQueue:(NSArray<AVPlayerItem *> *)playerItems {
+    for (AVPlayerItem *item in playerItems) {
+        [self.queuePlayer insertItem:item afterItem:nil];
+    }
+}
+
+- (void)installVideoNodeIfNeeded {
+    if (self.scene == nil || self.queuePlayer == nil) {
+        return;
+    }
+
+    [self.videoNode removeFromParent];
+    self.videoNode = [SKVideoNode videoNodeWithAVPlayer:self.queuePlayer];
+    self.videoNode.position = CGPointMake(self.scene.size.width / 2, self.scene.size.height / 2);
+    self.videoNode.size = self.scene.size;
+    self.videoNode.zPosition = 3;
+    [self.scene addChild:self.videoNode];
+}
+
+- (void)updateBackgroundForCurrentClipIfNeeded {
+    if (self.clipIndex != 0) {
+        return;
+    }
+
+    SKSpriteNode *imageNode = (SKSpriteNode *)[self.scene childNodeWithName:@"backgroundImage"];
+    NSURL *imageURL = [[NSBundle bundleForClass:[self class]] URLForResource:self.backgroundImages[arc4random_uniform((uint32_t)self.backgroundImages.count)] withExtension:nil];
+    NSImage *image = [[NSImage alloc] initWithContentsOfURL:imageURL];
+    double imageAspect = image.size.height / self.scene.size.height;
+    imageNode.texture = [SKTexture textureWithImage:image];
+    imageNode.position = CGPointMake(self.scene.size.width / 2, self.scene.size.height / 2 - self.scene.size.height * offside);
+    imageNode.size = CGSizeMake(image.size.width / imageAspect * scale, self.scene.size.height * scale);
+    
+    SKSpriteNode *colorNode = (SKSpriteNode *)[self.scene childNodeWithName:@"backgroundColor"];
+    colorNode.color = self.colors[arc4random_uniform((uint32_t)self.colors.count)];
+}
+
+- (void)queueFollowingClipIfNeeded {
+    self.queuedClipItems = nil;
+    if (self.queuePlayer == nil || self.clips.count == 0) {
+        return;
+    }
+
+    NSInteger nextClipIndex = [self nextClipIndexAfterIndex:self.clipIndex];
+    if (nextClipIndex == NSNotFound) {
+        return;
+    }
+
+    Clip *currentClip = self.clips[self.clipIndex];
+    Clip *nextClip = self.clips[nextClipIndex];
+    if ([self shouldResetVideoNodeFromClip:currentClip toClip:nextClip]) {
+        return;
+    }
+
+    NSArray<AVPlayerItem *> *nextClipItems = [self playerItemsForClip:nextClip];
+    if (nextClipItems.count == 0) {
+        NSLog(@"Error: Clip %@ has no playable video files!", nextClip.name);
+        return;
+    }
+
+    [self appendPlayerItemsToQueue:nextClipItems];
+    self.queuedClipItems = nextClipItems;
+}
+
+- (void)playCurrentClipResetVideoNode:(BOOL)resetVideoNode {
+    if (self.clips.count == 0 || self.scene == nil) {
+        return;
+    }
+
+    Clip *clip = self.clips[self.clipIndex];
+    NSArray<AVPlayerItem *> *playerItems = [self playerItemsForClip:clip];
+    if (playerItems.count == 0) {
+        NSLog(@"Error: Clip %@ has no playable video files!", clip.name);
+        return;
+    }
+
+    self.currentClipItems = playerItems;
+
+    if (resetVideoNode || self.queuePlayer == nil || self.videoNode == nil) {
+        [self.queuePlayer pause];
+        [self.queuePlayer removeAllItems];
+        self.queuePlayer = [AVQueuePlayer queuePlayerWithItems:self.currentClipItems];
+        [self installVideoNodeIfNeeded];
+    } else {
+        [self.queuePlayer pause];
+        [self.queuePlayer removeAllItems];
+        [self appendPlayerItemsToQueue:self.currentClipItems];
+    }
+
+    [self queueFollowingClipIfNeeded];
+
+    if (self.isAnimating) {
+        [self.queuePlayer play];
+    }
+}
+
 - (void)setupPlayer {
-    // create spritekit view to play alpha channel videos
     SKView *skView = [[SKView alloc] initWithFrame:self.bounds];
     skView.wantsLayer = YES;
-    skView.layer.backgroundColor = [[NSColor blackColor] CGColor];
+    skView.layer.backgroundColor = [[NSColor clearColor] CGColor];
     skView.ignoresSiblingOrder = YES;
     skView.allowsTransparency = YES;
     self.skView = skView;
     [self addSubview:self.skView];
     
     SKScene *scene = [[SKScene alloc] initWithSize:self.bounds.size];
+    scene.backgroundColor = [NSColor clearColor];
     scene.scaleMode = SKSceneScaleModeAspectFill;
     scene.userInteractionEnabled = NO;
     self.scene = scene;
     [self.skView presentScene:self.scene];
     
-    SKSpriteNode *solidColorBGNode = [SKSpriteNode spriteNodeWithColor:self.colors[arc4random_uniform(self.colors.count)] size:self.scene.size];
+    SKSpriteNode *solidColorBGNode = [SKSpriteNode spriteNodeWithColor:self.colors[arc4random_uniform((uint32_t)self.colors.count)] size:self.scene.size];
     solidColorBGNode.position = CGPointMake(scene.size.width / 2, scene.size.height / 2);
     solidColorBGNode.zPosition = 0;
     solidColorBGNode.name = @"backgroundColor";
@@ -124,7 +241,7 @@
     backgroundBNode.blendMode = SKBlendModeAlpha;
     [self.scene addChild:backgroundBNode];
     
-    NSURL *imageURL = [[NSBundle bundleForClass:[self class]] URLForResource:self.backgroundImages[arc4random_uniform(self.backgroundImages.count)] withExtension:nil];
+    NSURL *imageURL = [[NSBundle bundleForClass:[self class]] URLForResource:self.backgroundImages[arc4random_uniform((uint32_t)self.backgroundImages.count)] withExtension:nil];
     NSImage *image = [[NSImage alloc] initWithContentsOfURL:imageURL];
     double imageAspect = image.size.height / self.scene.size.height;
     SKTexture *texture = [SKTexture textureWithImage:image];
@@ -135,55 +252,56 @@
     backgroundNode.name = @"backgroundImage";
     backgroundNode.blendMode = SKBlendModeAlpha;
     [self.scene addChild:backgroundNode];
-    
-    self.queuePlayer = [AVQueuePlayer queuePlayerWithItems:[self configPlayerItems]];
-//    AVPlayerLayer *playerLayer = [AVPlayerLayer playerLayerWithPlayer:self.queuePlayer];
-    
-    SKVideoNode *videoNode = [SKVideoNode videoNodeWithAVPlayer:self.queuePlayer];
-    videoNode.position = CGPointMake(scene.size.width / 2, scene.size.height / 2);
-    videoNode.size = scene.size;
-    videoNode.zPosition = 3;
-    [self.scene addChild:videoNode];
+
+    [self loadPlaybackClips];
+    [self playCurrentClipResetVideoNode:NO];
     
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(playerItemDidReachEnd:)
                                                  name:AVPlayerItemDidPlayToEndTimeNotification
                                                object:nil];
-    
-//    [self.queuePlayer play];
-    
 }
 
 - (void)playerItemDidReachEnd:(NSNotification *)notification {
     AVPlayerItem *finishedItem = notification.object;
-    
-    NSURL *videoURL = [[NSBundle bundleForClass:[self class]] URLForResource:self.videoURLs[self.index] withExtension:nil];
-    AVPlayerItem *item = [AVPlayerItem playerItemWithURL:videoURL];
-    if (finishedItem) {
-        [self.queuePlayer insertItem:item afterItem:nil];
+    if (![finishedItem isKindOfClass:[AVPlayerItem class]]) {
+        return;
     }
-    self.index++;
-    if (self.index % self.videoURLs.count == 0) {
-        self.index = 0;
-        // change background color and image
-        SKSpriteNode *imageNode = (SKSpriteNode *)[self.scene childNodeWithName:@"backgroundImage"];
-        NSURL *imageURL = [[NSBundle bundleForClass:[self class]] URLForResource:self.backgroundImages[arc4random_uniform(self.backgroundImages.count)] withExtension:nil];
-        NSImage *image = [[NSImage alloc] initWithContentsOfURL:imageURL];
-        double imageAspect = image.size.height / self.scene.size.height;
-        imageNode.texture = [SKTexture textureWithImage:image];
-        imageNode.position = CGPointMake(self.scene.size.width / 2, self.scene.size.height / 2 - self.scene.size.height * offside);
-        imageNode.size = CGSizeMake(image.size.width / imageAspect * scale, self.scene.size.height * scale);
-        
-        SKSpriteNode *colorNode = (SKSpriteNode *)[self.scene childNodeWithName:@"backgroundColor"];
-        colorNode.color = self.colors[arc4random_uniform(self.colors.count)];
-        
+    if (self.currentClipItems.count == 0) {
+        return;
     }
-//    self.testText.stringValue = [NSString stringWithFormat:@"%d, %d", self.index, self.queuePlayer.items.count];
+    if (finishedItem != self.currentClipItems.lastObject) {
+        return;
+    }
+
+    Clip *currentClip = self.clips[self.clipIndex];
+    NSInteger nextClipIndex = [self nextClipIndexAfterIndex:self.clipIndex];
+    if (nextClipIndex == NSNotFound) {
+        return;
+    }
+
+    Clip *nextClip = self.clips[nextClipIndex];
+    BOOL shouldResetVideoNode = [self shouldResetVideoNodeFromClip:currentClip toClip:nextClip];
+
+    self.clipIndex = nextClipIndex;
+    if (self.clipIndex == 0) {
+        [self updateBackgroundForCurrentClipIfNeeded];
+    }
+
+    if (shouldResetVideoNode || self.queuedClipItems.count == 0) {
+        [self playCurrentClipResetVideoNode:shouldResetVideoNode];
+        return;
+    }
+
+    self.currentClipItems = self.queuedClipItems;
+    self.queuedClipItems = nil;
+    [self queueFollowingClipIfNeeded];
 }
 
 - (void)startAnimation
 {
     [super startAnimation];
+    self.isAnimating = YES;
     [self.queuePlayer play];
     os_log(_log, "snoopy startAnimation");
 }
@@ -191,12 +309,14 @@
 - (void)stopAnimation
 {
     [super stopAnimation];
+    self.isAnimating = NO;
     [self.queuePlayer pause];
-    self.queuePlayer.rate = 0;
-    [self.queuePlayer replaceCurrentItemWithPlayerItem:nil];
+    [self.queuePlayer removeAllItems];
     self.queuePlayer = nil;
-    [self.playerLayer removeAllAnimations];
-    [self.playerLayer removeFromSuperlayer];
+    self.currentClipItems = nil;
+    self.queuedClipItems = nil;
+    [self.videoNode removeFromParent];
+    self.videoNode = nil;
     [self.scene removeAllChildren];
     [self.scene removeFromParent];
     self.scene = nil;
@@ -232,8 +352,14 @@
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [[NSDistributedNotificationCenter defaultCenter] removeObserver:self];
     [self.queuePlayer pause];
+    [self.queuePlayer removeAllItems];
     self.queuePlayer = nil;
+    self.currentClipItems = nil;
+    self.queuedClipItems = nil;
+    [self.videoNode removeFromParent];
+    self.videoNode = nil;
     os_log(_log, "snoopy dealloc");
 }
 

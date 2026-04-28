@@ -21,7 +21,7 @@
     }
     
     NSPredicate *movFilter = [NSPredicate predicateWithFormat:@"self ENDSWITH[c] '.mov'"];
-    NSArray<NSString *> *movFiles = [files filteredArrayUsingPredicate:movFilter];
+    NSArray<NSString *> *movFiles = [[files filteredArrayUsingPredicate:movFilter] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
     
     NSMutableDictionary<NSString *, Clip *> *clipsDict = [NSMutableDictionary dictionary];
     
@@ -72,7 +72,7 @@
     return clipsDict.allValues;
 }
 
-+ (NSArray<NSString *> *)randomClipURLs:(NSArray<Clip *> *)clips {
++ (NSArray<Clip *> *)randomizedClips:(NSArray<Clip *> *)clips {
     NSMutableArray<Clip *> *mutableClips = [clips mutableCopy];
     NSMutableArray<Clip *> *shuffledArray = [NSMutableArray array];
     // Fisher-Yates 洗牌：先随机打乱数组
@@ -104,22 +104,33 @@
         [shuffledArray addObject:nextClip];
         lastClip = nextClip;
     }
+    return [shuffledArray copy];
+}
+
++ (NSArray<NSString *> *)randomClipURLs:(NSArray<Clip *> *)clips {
+    NSArray<Clip *> *shuffledArray = [self randomizedClips:clips];
     NSMutableArray *urlArray = [NSMutableArray array];
     for (Clip *clip in shuffledArray) {
-        if (clip.startURL) {
-            [urlArray addObject:clip.startURL];
+        [urlArray addObjectsFromArray:[clip playbackURLs]];
+    }
+    return [urlArray copy];
+}
+
+- (NSArray<NSString *> *)playbackURLs {
+    NSMutableArray<NSString *> *urlArray = [NSMutableArray array];
+    if (self.startURL) {
+        [urlArray addObject:self.startURL];
+    }
+    if (self.loopURL) {
+        for (int i = 0; i < self.repeat; i++) {
+            [urlArray addObject:self.loopURL];
         }
-        if (clip.loopURL) {
-            for (int i = 0; i < clip.repeat; i++) {
-                [urlArray addObject:clip.loopURL];
-            }
-        }
-        if (clip.endURL) {
-            [urlArray addObject:clip.endURL];
-        }
-        if (clip.others) {
-            [urlArray addObjectsFromArray:clip.others];
-        }
+    }
+    if (self.endURL) {
+        [urlArray addObject:self.endURL];
+    }
+    if (self.others) {
+        [urlArray addObjectsFromArray:self.others];
     }
     return [urlArray copy];
 }

@@ -21,7 +21,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSArray *others;
 
 + (NSArray<Clip *> *)loadClips;
++ (NSArray<Clip *> *)randomizedClips:(NSArray<Clip *>*) clips;
 + (NSArray<NSString *> *)randomClipURLs:(NSArray<Clip *>*) clips;
+- (NSArray<NSString *> *)playbackURLs;
 
 @end
 
